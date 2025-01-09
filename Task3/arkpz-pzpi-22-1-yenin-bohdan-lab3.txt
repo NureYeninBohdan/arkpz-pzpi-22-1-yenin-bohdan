@@ -1,0 +1,280 @@
+Харківський національний університет радіоелектроніки
+Факультет комп'ютерних наук
+Кафедра програмної інженерії
+
+
+
+
+ЗВІТ
+до лабораторної роботи №3
+ з дисципліни
+"Аналіз та рефакторинг коду"
+на тему "Розробка бізнес-логіки та функцій адміністрування серверної частини програмної системи"
+
+
+
+
+Виконав ст. гр ПЗПІ-22-1
+Єнін Богдан Геннадійович
+
+Перевірив
+ст. викладач кафедри ПІ
+Сокорчук Ігор Петрович
+
+
+
+
+
+
+Харків 2024
+1 РОЗРОБКА БІЗНЕС-ЛОГІКИ СЕРВЕРНОЇ ЧАСТИНИ ПРОГРАМНОЇ СИСТЕМИ
+Бізнес-логіка включає правила та дії, які визначають функціональність програми:
+1)	Отримання списку користувачів, рецептів або даних пивоваріння.
+2)	Додавання даних в кожну з 3 існуючих таблиць.
+3)	Редагування існуючих рядків.
+4)	Видалення існуючих рядків.
+Код для отримання, додавання, редагування і видалення даних з БД(на даному етапі значення вказані в самих функціях):
+// CRUD-функції
+class CRUDOperations {
+public:
+    static std::string getAllRecords(Database& db, const std::wstring& tableName, const std::vector<std::string>& columns) {
+        std::wstring query = L"SELECT * FROM " + tableName + L";";
+        return executeSelectQuery(db, query, columns);
+    }
+
+    static void addRecord(Database& db, const std::wstring& query) {
+        executeQuery(db, query);
+    }
+
+    static void updateRecord(Database& db, const std::wstring& query) {
+        executeQuery(db, query);
+    }
+
+    static void deleteRecord(Database& db, const std::wstring& tableName, const std::wstring& columnName, int id) {
+        std::wstring query = L"DELETE FROM " + tableName + L" WHERE " + columnName + L" = " + std::to_wstring(id);
+        executeQuery(db, query);
+    }
+    
+    static bool recordExists(Database& db, const std::wstring& table, const std::wstring& column, int id) {
+        SQLHANDLE stmtHandle;
+        if (SQLAllocHandle(SQL_HANDLE_STMT, db.connHandle, &stmtHandle) != SQL_SUCCESS) {
+            std::cerr << "Unable to allocate statement handle." << std::endl;
+            return false;
+        }
+
+        std::wstring query = L"SELECT COUNT(*) FROM " + table + L" WHERE " + column + L" = " + std::to_wstring(id);
+        if (SQLExecDirect(stmtHandle, (SQLWCHAR*)query.c_str(), SQL_NTS) != SQL_SUCCESS) {
+            std::cerr << "Error executing existence check query." << std::endl;
+            SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+            return false;
+        }
+
+        SQLINTEGER recordCount = 0;
+        if (SQLFetch(stmtHandle) == SQL_SUCCESS) {
+            SQLGetData(stmtHandle, 1, SQL_C_SLONG, &recordCount, 0, NULL);
+        }
+
+        SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+        return recordCount > 0;
+    }
+};
+
+2 РОЗРОБКА ФУНКЦІЙ АДМІНІСТРУВАННЯ СЕРВЕРНОЇ ЧАСТИНИ ПРОГРАМНОЇ СИСТЕМИ
+UML-діаграма діяльності для серверної частини:
+ 
+			Рис. 2.1 – UML-діаграма діяльності
+
+Функції адміністрування серверної частини забезпечують підключення до бази даних і керування серверною частиною.
+Код з потрібними для адміністрування серверної частини функціями:
+// Інтеграція функцій в сервер
+void handleClient(int clientSocket, Database& db) {
+    char buffer[4096];
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+
+    if (bytesReceived <= 0) {
+        closesocket(clientSocket);
+        return;
+    }
+
+    buffer[bytesReceived] = '\0';
+    std::string request(buffer);
+    std::istringstream requestStream(request);
+    std::string method, endpoint;
+    requestStream >> method >> endpoint;
+
+    auto sendResponse = [&](const std::string& status, const std::string& contentType, const std::string& body) {
+        std::string response = "HTTP/1.1 " + status + "\r\nContent-Type: " + contentType + "\r\n\r\n" + body;
+        send(clientSocket, response.c_str(), response.size(), 0);
+        };
+
+    try {
+        if (method == "GET") {
+            if (endpoint == "/") {
+                sendResponse("200 OK", "application/json", "{\"data\":\"Sample GET response\"}");
+            }
+            else if (endpoint == "/users") {
+                sendResponse("200 OK", "application/json", CRUDOperations::getAllRecords(db, L"Users", { "UserID", "Username", "Password", "Role" }));
+            }
+            else if (endpoint == "/recipes") {
+                sendResponse("200 OK", "application/json", CRUDOperations::getAllRecords(db, L"Recipes", { "RecipeID", "UserID", "Name", "Ingredients", "Steps" }));
+            }
+            else if (endpoint == "/brewing_data") {
+                sendResponse("200 OK", "application/json", CRUDOperations::getAllRecords(db, L"BrewingData", { "DataID", "RecipeID", "Temperature", "Humidity", "Timestamp" }));
+            }
+            else {
+                sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+            }
+        }
+        else if (method == "POST") {
+            if (endpoint == "/add_user") {
+                CRUDOperations::addRecord(db, L"INSERT INTO Users (Username, Password, Role) VALUES ('yb1509', '1111', 'Admin')");
+                sendResponse("200 OK", "application/json", "{\"status\":\"user_added\"}");
+            }
+            else if (endpoint == "/add_recipe") {
+                if (!CRUDOperations::recordExists(db, L"Users", L"UserID", 1)) {
+                    sendResponse("400 Bad Request", "application/json", "{\"error\":\"UserID does not exist\"}");
+                }
+                else {
+                    CRUDOperations::addRecord(db, L"INSERT INTO Recipes (UserID, Name, Ingredients, Steps) VALUES (1, 'Recipe1', 'Water, Malt, Hops', 'Step1, Step2, Step3, Step4')");
+                    sendResponse("200 OK", "application/json", "{\"status\":\"recipe_added\"}");
+                }
+            }
+            else if (endpoint == "/add_brewing_data") {
+                if (!CRUDOperations::recordExists(db, L"Recipes", L"RecipeID", 1)) {
+                    sendResponse("400 Bad Request", "application/json", "{\"error\":\"RecipeID does not exist\"}");
+                }
+                else {
+                    CRUDOperations::addRecord(db, L"INSERT INTO BrewingData (RecipeID, Temperature, Humidity, Timestamp) VALUES (1, 50.0, 50.0, '2011-11-11 11:11:11')");
+                    sendResponse("200 OK", "application/json", "{\"status\":\"data_added\"}");
+                }
+            }
+            else if (endpoint == "/shutdown") {
+                sendResponse("200 OK", "application/json", "{\"status\":\"shutting_down\"}");
+                exit(0);
+            }
+            else {
+                sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+            }
+        }
+        else if (method == "PUT") {
+            if (endpoint == "/update_user") {
+                if (!CRUDOperations::recordExists(db, L"Users", L"UserID", 1)) {
+                    sendResponse("404 Not Found", "application/json", "{\"error\":\"User not found.\"}");
+                }
+                else {
+                    CRUDOperations::updateRecord(db, L"UPDATE Users SET Username='yb_1509', Password='1234', Role='User' WHERE UserID=1");
+                    sendResponse("200 OK", "application/json", "{\"status\":\"user_updated\"}");
+                }
+            }
+            else if (endpoint == "/update_recipe") {
+                if (!CRUDOperations::recordExists(db, L"Recipes", L"RecipeID", 1)) {
+                    sendResponse("404 Not Found", "application/json", "{\"error\":\"Recipe not found.\"}");
+                }
+                else {
+                    CRUDOperations::updateRecord(db, L"UPDATE Recipes SET Name='Recipe2', Ingredients='Water, Malt, Hops', Steps='Step1, Step2, Step3, Step4, Step5' WHERE RecipeID=1");
+                    sendResponse("200 OK", "application/json", "{\"status\":\"recipe_updated\"}");
+                }
+            }
+            else if (endpoint == "/update_brewing_data") {
+                if (!CRUDOperations::recordExists(db, L"BrewingData", L"BrewingDataID", 1)) {
+                    sendResponse("404 Not Found", "application/json", "{\"error\":\"Brewing data not found.\"}");
+                }
+                else {
+                    CRUDOperations::updateRecord(db, L"UPDATE BrewingData SET Temperature=55.0, Humidity=55.0, Timestamp='2011-11-11 11:11:11' WHERE DataID=1");
+                    sendResponse("200 OK", "application/json", "{\"status\":\"brewing_data_updated\"}");
+                }
+            }
+            else {
+                sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+            }
+        }
+        else if (method == "DELETE") {
+            if (endpoint == "/delete_user") {
+                if (!CRUDOperations::recordExists(db, L"Users", L"UserID", 1)) {
+                    sendResponse("404 Not Found", "application/json", "{\"error\":\"User not found.\"}");
+                }
+                else if (CRUDOperations::recordExists(db, L"Recipes", L"UserID", 1)) {
+                    sendResponse("400 Bad Request", "application/json", "{\"error\":\"Cannot delete user; it is referenced in Recipes.\"}");
+                }
+                else {
+                    CRUDOperations::deleteRecord(db, L"Users", L"UserID", 1);
+                    sendResponse("200 OK", "application/json", "{\"status\":\"user_deleted\"}");
+                }
+            }
+            else if (endpoint == "/delete_recipe") {
+                if (!CRUDOperations::recordExists(db, L"Recipes", L"RecipeID", 1)) {
+                    sendResponse("404 Not Found", "application/json", "{\"error\":\"Recipe not found.\"}");
+                }
+                else if (CRUDOperations::recordExists(db, L"BrewingData", L"RecipeID", 1)) {
+                    sendResponse("400 Bad Request", "application/json", "{\"error\":\"Cannot delete recipe; it is referenced in BrewingData.\"}");
+                }
+                else {
+                    CRUDOperations::deleteRecord(db, L"Recipes", L"RecipeID", 1);
+                    sendResponse("200 OK", "application/json", "{\"status\":\"recipe_deleted\"}");
+                }
+            }
+            else if (endpoint == "/delete_brewing_data") {
+                if (!CRUDOperations::recordExists(db, L"BrewingData", L"DataID", 1)) {
+                    sendResponse("404 Not Found", "application/json", "{\"error\":\"Brewing data not found.\"}");
+                }
+                else {
+                    CRUDOperations::deleteRecord(db, L"BrewingData", L"DataID", 1);
+                    sendResponse("200 OK", "application/json", "{\"status\":\"data_deleted\"}");
+                }
+            }
+            else {
+                sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+            }
+        }
+        else {
+            sendResponse("405 Method Not Allowed", "text/plain", "Method not allowed");
+        }
+    }
+    catch (const std::exception& e) {
+        sendResponse("500 Internal Server Error", "application/json", "{\"error\":\"" + std::string(e.what()) + "\"}");
+    }
+
+    closesocket(clientSocket);
+}
+
+3 ПРОГРАМНА РЕАЛІЗАЦІЯ
+	void startServer(Database& db, int port) {
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serverAddr = { 0 };
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
+    listen(serverSocket, 10);
+
+    std::cout << "Server started on port " << port << std::endl;
+
+    while (true) {
+        sockaddr_in clientAddr;
+        int clientLen = sizeof(clientAddr);
+        SOCKET clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientLen);
+
+        std::thread(handleClient, clientSocket, std::ref(db)).detach();
+    }
+
+    WSACleanup();
+}
+
+int main() {
+    Database db;
+    std::wstring connStr = L"DRIVER={SQL Server};SERVER=localhost;DATABASE=db1;Trusted_Connection=Yes;";
+    if (!initDatabase(db, connStr)) {
+        std::cerr << "Failed to connect to database." << std::endl;
+        return -1;
+    }
+
+    startServer(db, 8080);
+    closeDatabase(db);
+    return 0;
+}	
+4 ВИСНОВКИ	
+	Під час виконання роботи було створено функції для роботи з серверною частиною програмної системи, а саме: CRUD-функції для роботи з БД, функції підключення до БД, запуску та зупинки серверу. Все це було реалізовано в одному коді і полегшить майбутню розробку програми.
