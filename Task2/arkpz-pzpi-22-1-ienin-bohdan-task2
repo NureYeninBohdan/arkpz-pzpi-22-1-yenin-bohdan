@@ -1,0 +1,376 @@
+Харківський національний університет радіоелектроніки
+Факультет комп'ютерних наук
+Кафедра програмної інженерії
+
+
+
+
+ЗВІТ
+до лабораторної роботи №2
+ з дисципліни
+"Аналіз та рефакторинг коду"
+на тему "Розробка бази даних для серверної частини  програмної системи та прикладного програмного інтерфейсу"
+
+
+
+
+Виконав ст. гр ПЗПІ-22-1
+Єнін Богдан Геннадійович
+
+Перевірив
+ст. викладач кафедри ПІ
+Сокорчук Ігор Петрович
+
+
+
+
+
+
+Харків 2024
+	1 БУДОВА ПРОГРАМНОЇ СИСТЕМИ
+
+Опис архітектури:
+IoT-пристрій (ESP32): збирає дані про процес пивоваріння та надсилає їх на сервер через HTTP-запити.
+Сервер: написаний на C++, взаємодіє з БД.
+БД: реалізована в SQL Server Management Studio.
+Клієнт: веб-додаток для управління рецептами та процесами.
+
+2 UML-ДІАГРАМА ПРЕЦЕДЕНТІВ ДЛЯ СЕРВЕРНОЇ ЧАСТИНИ СИСТЕМИ
+ 
+		Рис. 2.1 – UML-діаграма прецедентів
+
+		
+
+
+
+		3 ER-ДІАГРАМА ДАНИХ
+Основні таблиці:
+Users:
+UserID (PK)
+Username
+Password
+Role
+Recipes:
+RecipeID (PK)
+UserID (FK)
+Name
+Ingredients
+Steps
+BrewingData:
+DataID (PK)
+RecipeID (FK)
+Temperature
+Humidity
+Timestamp
+
+Зв’язки між таблицями: 
+Між таблицями Users та Recipes зв’язок 1 до N, оскільки один користувач може зберігати багато рецептів.
+Між таблицями Recipes та BrewingData зв’язок 1 до N, оскільки пиво за одним рецептом може варитися багато разів, значить, доведеться багато разів переглядати дані пивоваріння.
+
+ER-діаграма наведена нижче, на Рис. 3.1.
+
+ 
+		Рис. 3.1 – ER-діаграма
+
+                      4 РОЗРОБКА БАЗИ ДАНИХ ПРОГРАМНОЇ СИСТЕМИ
+Базу даних було створено за допомогою SQL Server Management Studio 19.
+Вміст SQL-запиту для створення таблиць:
+CREATE TABLE Users (
+    UserID INT PRIMARY KEY IDENTITY(1,1),
+    Username NVARCHAR(50) NOT NULL,
+    Password NVARCHAR(50) NOT NULL,
+    Role NVARCHAR(20) NOT NULL
+);
+
+CREATE TABLE Recipes (
+    RecipeID INT PRIMARY KEY IDENTITY(1,1),
+    UserID INT FOREIGN KEY REFERENCES Users(UserID),
+    Name NVARCHAR(100) NOT NULL,
+    Ingredients NVARCHAR(MAX),
+    Steps NVARCHAR(MAX)
+);
+
+CREATE TABLE BrewingData (
+    DataID INT PRIMARY KEY IDENTITY(1,1),
+    RecipeID INT FOREIGN KEY REFERENCES Recipes(RecipeID),
+    Temperature FLOAT NOT NULL,
+    Humidity FLOAT NOT NULL,
+    Timestamp DATETIME DEFAULT GETDATE()
+);
+                           
+                          5 СТВОРЕННЯ ДІАГРАМИ СТРУКТУРИ БД
+В розділі Database Diagrams в SQL Server було створено діаграму для бази даних.
+ 
+	Рис. 5.1 – процес створення діаграми
+В результаті було створено діаграму з 3 таблиць, поєднаних між собою як на ER-діаграмі.
+	 
+		Рис. 5.2 – діаграма структури бази даних
+
+	6 РОЗРОБКА ФУНКЦІЇ РОБОТИ З БД
+#pragma comment(lib, "Ws2_32.lib")
+#include <iostream>
+#include <windows.h>
+#include <sqlext.h>
+#include <string>
+#include <sstream>
+#include <thread>
+#include <vector>
+#include <map>
+
+// Структура для зберігання інформації про підключення
+struct Database {
+    SQLHANDLE envHandle;
+    SQLHANDLE connHandle;
+};
+
+// Функція для ініціалізації підключення до бази даних
+bool initDatabase(Database& db, const std::wstring& connectionString) {
+    if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &db.envHandle) != SQL_SUCCESS) {
+        std::cerr << "Unable to allocate environment handle." << std::endl;
+        return false;
+    }
+    if (SQLSetEnvAttr(db.envHandle, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0) != SQL_SUCCESS) {
+        SQLFreeHandle(SQL_HANDLE_ENV, db.envHandle);
+        return false;
+    }
+    if (SQLAllocHandle(SQL_HANDLE_DBC, db.envHandle, &db.connHandle) != SQL_SUCCESS) {
+        SQLFreeHandle(SQL_HANDLE_ENV, db.envHandle);
+        return false;
+    }
+
+    SQLRETURN retcode = SQLDriverConnect(db.connHandle, NULL,
+        (SQLWCHAR*)connectionString.c_str(),
+        SQL_NTS, NULL, 0, NULL, SQL_DRIVER_NOPROMPT);
+
+    return (retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO);
+}
+
+// Функція для закриття підключення до бази даних
+void closeDatabase(Database& db) {
+    SQLDisconnect(db.connHandle);
+    SQLFreeHandle(SQL_HANDLE_DBC, db.connHandle);
+    SQLFreeHandle(SQL_HANDLE_ENV, db.envHandle);
+}
+
+// Виконання SQL-запиту
+bool executeQuery(Database& db, const std::wstring& query) {
+    SQLHANDLE stmtHandle;
+    if (SQLAllocHandle(SQL_HANDLE_STMT, db.connHandle, &stmtHandle) != SQL_SUCCESS) {
+        return false;
+    }
+    SQLRETURN retcode = SQLExecDirect(stmtHandle, (SQLWCHAR*)query.c_str(), SQL_NTS);
+    SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+    return (retcode == SQL_SUCCESS || retcode == SQL_SUCCESS_WITH_INFO);
+}
+
+
+
+// Загальна функція для отримання результатів SELECT-запиту
+std::string executeSelectQuery(Database& db, const std::wstring& query, const std::vector<std::string>& columns) {
+    SQLHANDLE stmtHandle;
+    if (SQLAllocHandle(SQL_HANDLE_STMT, db.connHandle, &stmtHandle) != SQL_SUCCESS) {
+        return "[]";
+    }
+
+    if (SQLExecDirect(stmtHandle, (SQLWCHAR*)query.c_str(), SQL_NTS) != SQL_SUCCESS) {
+        SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+        return "[]";
+    }
+
+    SQLCHAR buffer[256];
+    SQLLEN indicator;
+    std::string jsonResponse = "[";
+
+    while (SQLFetch(stmtHandle) == SQL_SUCCESS) {
+        jsonResponse += "{";
+        for (size_t i = 0; i < columns.size(); ++i) {
+            SQLGetData(stmtHandle, i + 1, SQL_C_CHAR, buffer, sizeof(buffer), &indicator);
+            jsonResponse += "\"" + columns[i] + "\":\"" + std::string((char*)buffer) + "\"";
+            if (i < columns.size() - 1) jsonResponse += ",";
+        }
+        jsonResponse += "},";
+    }
+
+    if (jsonResponse.back() == ',') {
+        jsonResponse.pop_back();
+    }
+
+    jsonResponse += "]";
+    SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+
+    return jsonResponse;
+}
+// CRUD-функції
+class CRUDOperations {
+public:
+    static std::string getAllRecords(Database& db, const std::wstring& tableName, const std::vector<std::string>& columns) {
+        std::wstring query = L"SELECT * FROM " + tableName + L";";
+        return executeSelectQuery(db, query, columns);
+    }
+
+    static void addRecord(Database& db, const std::wstring& query) {
+        executeQuery(db, query);
+    }
+    static bool recordExists(Database& db, const std::wstring& table, const std::wstring& column, int id) {
+    SQLHANDLE stmtHandle;
+    if (SQLAllocHandle(SQL_HANDLE_STMT, db.connHandle, &stmtHandle) != SQL_SUCCESS) {
+        std::cerr << "Unable to allocate statement handle." << std::endl;
+        return false;
+    }
+
+    std::wstring query = L"SELECT COUNT(*) FROM " + table + L" WHERE " + column + L" = " + std::to_wstring(id);
+    if (SQLExecDirect(stmtHandle, (SQLWCHAR*)query.c_str(), SQL_NTS) != SQL_SUCCESS) {
+        std::cerr << "Error executing existence check query." << std::endl;
+        SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+        return false;
+    }
+
+    SQLINTEGER recordCount = 0;
+    if (SQLFetch(stmtHandle) == SQL_SUCCESS) {
+        SQLGetData(stmtHandle, 1, SQL_C_SLONG, &recordCount, 0, NULL);
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmtHandle);
+    return recordCount > 0;
+}
+};
+
+7 РОЗРОБКА API ДЛЯ ВЗАЄМОДІЇ СЕРВЕРНОЇ ЧАСТИНИ З КЛІЄНТАМИ
+// Інтеграція функцій в сервер
+void handleClient(int clientSocket, Database& db) {
+    char buffer[4096];
+    int bytesReceived = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+
+    if (bytesReceived <= 0) {
+        closesocket(clientSocket);
+        return;
+    }
+
+    buffer[bytesReceived] = '\0';
+    std::string request(buffer);
+    std::istringstream requestStream(request);
+    std::string method, endpoint;
+    requestStream >> method >> endpoint;
+
+    auto sendResponse = [&](const std::string& status, const std::string& contentType, const std::string& body) {
+        std::string response = "HTTP/1.1 " + status + "\r\nContent-Type: " + contentType + "\r\n\r\n" + body;
+        send(clientSocket, response.c_str(), response.size(), 0);
+        };
+
+    try {
+    if (method == "GET") {
+        if (endpoint == "/") {
+            sendResponse("200 OK", "application/json", "{\"data\":\"Sample GET response\"}");
+        }
+        else if (endpoint == "/users") {
+            sendResponse("200 OK", "application/json", CRUDOperations::getAllRecords(db, L"Users", { "UserID", "Username", "Password", "Role" }));
+        }
+        else if (endpoint == "/recipes") {
+            sendResponse("200 OK", "application/json", CRUDOperations::getAllRecords(db, L"Recipes", { "RecipeID", "UserID", "Name", "Ingredients", "Steps" }));
+        }
+        else if (endpoint == "/brewing_data") {
+            sendResponse("200 OK", "application/json", CRUDOperations::getAllRecords(db, L"BrewingData", { "DataID", "RecipeID", "Temperature", "Humidity", "Timestamp" }));
+        }
+        else {
+            sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+        }
+    }
+    else if (method == "POST") {
+        if (endpoint == "/add_user") {
+            CRUDOperations::addRecord(db, L"INSERT INTO Users (Username, Password, Role) VALUES ('yb1509', '1111', 'Admin')");
+            sendResponse("200 OK", "application/json", "{\"status\":\"user_added\"}");
+        }
+        else if (endpoint == "/add_recipe") {
+            if (!CRUDOperations::recordExists(db, L"Users", L"UserID", 1)) {
+                sendResponse("400 Bad Request", "application/json", "{\"error\":\"UserID does not exist\"}");
+            }
+            else {
+                CRUDOperations::addRecord(db, L"INSERT INTO Recipes (UserID, Name, Ingredients, Steps) VALUES (1, 'Recipe1', 'Water, Malt, Hops', 'Step1, Step2, Step3, Step4')");
+                sendResponse("200 OK", "application/json", "{\"status\":\"recipe_added\"}");
+            }
+        }
+        else if (endpoint == "/add_brewing_data") {
+            if (!CRUDOperations::recordExists(db, L"Recipes", L"RecipeID", 1)) {
+                sendResponse("400 Bad Request", "application/json", "{\"error\":\"RecipeID does not exist\"}");
+            }
+            else {
+                CRUDOperations::addRecord(db, L"INSERT INTO BrewingData (RecipeID, Temperature, Humidity, Timestamp) VALUES (1, 50.0, 50.0, '2011-11-11 11:11:11')");
+                sendResponse("200 OK", "application/json", "{\"status\":\"data_added\"}");
+            }
+        }
+        else if (endpoint == "/shutdown") {
+            sendResponse("200 OK", "application/json", "{\"status\":\"shutting_down\"}");
+            exit(0);
+        }
+        else {
+            sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+        }
+    }	
+            else {
+                sendResponse("404 Not Found", "text/plain", "Endpoint not found");
+            }
+        }
+        else {
+            sendResponse("405 Method Not Allowed", "text/plain", "Method not allowed");
+        }
+    }
+    catch (const std::exception& e) {
+        sendResponse("500 Internal Server Error", "application/json", "{\"error\":\"" + std::string(e.what()) + "\"}");
+    }
+
+    closesocket(clientSocket);
+}
+
+		8 СПЕЦИФІКАЦІЯ РОЗРОБЛЕНОГО API
+Специфікація REST API
+URL: http://localhost:8080
+Методи:
+GET / 
+
+	GET / виводить тестове повідомлення:
+	{
+    "data": "Sample GET response"
+}
+
+	9 ПРОГРАМНА РЕАЛІЗАЦІЯ РОЗРОБЛЕНОГО API ТА ФУНКЦІЙ РОБОТИ З БД
+void startServer(Database& db, int port) {
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in serverAddr = { 0 };
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
+    listen(serverSocket, 10);
+
+    std::cout << "Server started on port " << port << std::endl;
+
+    while (true) {
+        sockaddr_in clientAddr;
+        int clientLen = sizeof(clientAddr);
+        SOCKET clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientLen);
+
+        std::thread(handleClient, clientSocket, std::ref(db)).detach();
+    }
+
+    WSACleanup();
+}
+
+int main() {
+    Database db;
+    std::wstring connStr = L"DRIVER={SQL Server};SERVER=localhost;DATABASE=db1;Trusted_Connection=Yes;";
+    if (!initDatabase(db, connStr)) {
+        std::cerr << "Failed to connect to database." << std::endl;
+        return -1;
+    }
+
+    startServer(db, 8080);
+    closeDatabase(db);
+    return 0;
+}
+		
+			10 ВИСНОВКИ
+Під час виконання роботи я створив базу даних для майбутньої програми, зробив можливим підключатися та працювати з БД і розробив API для взаємодії серверної частини з клієнтами. Була перевірена правильність роботи програми, а також опановані потрібні для майбутньої роботи навички.
